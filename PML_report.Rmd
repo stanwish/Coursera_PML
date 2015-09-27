@@ -1,0 +1,163 @@
+---
+title: "Coursera Practical Machine Learning Course Project"
+author: "Ling"
+date: "Sep. 24th, 2015"
+output: 
+  html_document:
+    theme: cerulean
+    css: table2.css
+    fig_caption: yes
+---
+
+## Excecutive Summary
+
+The purpose of this project was to predict the sport class based on the data taken from wearable equipments.  In order to do so, training data was filtered, scaled, and partitioned into a sub-training set and a sub-validation set with ratio of 7:3.  Then several models were built using the sub-training set and tested using the sub-validation set.  Finally, the stacked model was used to predict the sport class of the 20 test data points.
+
+```{r,echo=T, warning=F,message=F}
+# initialization
+library(caret)
+library(gridExtra)
+library(randomForest)
+library(doMC)
+library(knitr)
+library(rpart)
+library(gbm)
+library(MASS)
+library(plyr)
+mcaffinity(1:3)
+registerDoMC(cores = 3)
+load('PML3.RData')
+```
+
+## Data Exploratory
+
+#### Filtering
+
+At a first glance, many columns of the dataset were empty strings or filled with NA.  In addition, some columns recorded experiment information that were not relevant for predicting the final class (i.e. timestamp, window,total).  Therefore, these columns were removed. 50 features remained.
+
+```{r, echo=T}
+training<-read.table('pml-training.csv',sep=',',header=T,stringsAsFactors = F)
+dim(training) # 19622, 160
+FILTER<-function(x) {
+  # remove columns with > 80% NA or empty strings
+  if (sum(is.na(x)) > length(x)*0.8) {
+    return (FALSE)
+  } else if (sum(nchar(x)) < length(x)*0.8) {
+    return (FALSE)
+  } else {
+    return (TRUE)
+  }
+}
+training_keep<-apply(training,2,FILTER)
+training_filtered<-training[,training_keep]
+# Also remove column X, timestamp and window info
+training_filtered<-training_filtered[,c(-1,-3:-7,-11,-24,-37,-50)]
+```
+
+#### Scaling
+
+In order to make sure all data would be properly treated in predicting the class, it was necessary to look at the distribution of the numberic data to make sure they were scaled at the same level.  For categoric variable (carlitos and class), it was necessary to make them into factors.
+
+``` {r, echo=T,fig.width=14,fig.height=10}
+training_scaled<-scale(training_filtered[,2:49])
+par(mfrow=c(2,1))
+boxplot(training_filtered[,2:49],outline=F,names=F,main='Before Scaling')
+boxplot(training_scaled,outline=F,names=F,main='After Scaling')
+```
+
+#### PCA
+
+When the PC1 and PC2 (~30% variability) were plot, it showed that each user had their unique pattern of class distribution.  User information was critical to successfully predict class from raw data.
+
+```{r, echo=T,fig.width=14,fig.height=5}
+PCA<-prcomp(training_scaled,center=F)
+dfPCA<-data.frame(user=training_filtered$user_name,classe=training_filtered$classe,PC1=PCA$x[,"PC1"],PC2=PCA$x[,"PC2"])
+p1<-ggplot(dfPCA,aes(x=PC1,y=PC2,col=factor(classe))) + geom_point() + theme_bw() + ggtitle("Top 2 PCA Color by Classe")
+p2<-ggplot(dfPCA,aes(x=PC1,y=PC2,col=factor(user))) + geom_point() + theme_bw() + ggtitle("Top 2 PCA Color by User")
+grid.arrange(p1,p2,ncol=2)
+```
+
+## Model Selection
+
+#### Data Partition
+
+Scaled data was paritioned into a training set and a validation set with ratio 7:3.
+
+```{r, echo=T,eval=F}
+training_final<-cbind(training_filtered[,c("user_name","classe")],training_scaled)
+training_final$user_name<-as.factor(training_final$user_name)
+training_final$classe<-as.factor(training_final$classe)
+set.seed(12345)
+inTraining<-createDataPartition(training_final$user_name,p=0.7,list=F)
+training1<-training_final[inTraining,]
+validation1<-training_final[-inTraining,]
+```
+
+#### Model Selection
+
+Trained data with models of rpart, gbm, lda, random forest.  Finally stacked all tested models using random forest.
+
+```{r, echo=T, eval=F}
+ctrl<-trainControl(method='cv',number=5,preProcOptions = list(thresh = 0.95))
+fit1<-train(classe~.,data=training1,preProcess = 'pca',method='rpart',trControl=ctrl) # 34.5 accuracy on training
+fit2<-train(classe~.,data=training1,preProcess = 'pca',method='gbm',trControl=ctrl) # 82 accuracy on training
+fit3<-train(classe~.,data=training1,preProcess = 'pca',method='lda',trControl=ctrl) # 52 accuracy on training
+fitrf<-randomForest(classe~.,data=training1,mtry=7,importance=TRUE) # a much quicker rf method learned from forum.  99 accuracy on training
+
+predict_fit1<-predict(fit1,training1)
+predict_fit2<-predict(fit2,training1)
+predict_fit3<-predict(fit3,training1)
+predict_fitrf<-predict(fitrf,training1)
+predictDF<-data.frame(rpart=predict_fit1,gbm=predict_fit2,lda=predict_fit3,rf=predict_fitrf,classe=training1$classe)
+combModFit<-train(classe~.,data=predictDF,method='rf',trControl=trainControl(method='cv',number=5)) 
+```
+
+#### Validation
+
+Tested the stacked model on the validation data, yielding about 99% accuracy on average.
+
+``` {r, echo=T,eval=F}
+validation_fit1<-predict(fit1,validation1)
+validation_fit2<-predict(fit2,validation1)
+validation_fit3<-predict(fit3,validation1)
+validation_fitrf<-predict(fitrf,validation1)
+validationDF<-data.frame(rpart=validation_fit1,gbm=validation_fit2,lda=validation_fit3,rf=validation_fitrf)
+confusionMatrix(predict(combModFit,validationDF),validation1$classe)
+```
+
+```{r, echo=F}
+print(CROSS)
+```
+
+## Predicting Test Result
+
+First preprocessed the test data using the same methods.  Then predicted the final result using the stacked model.
+
+``` {r, echo=T,results='asis'}
+testing<-read.table('pml-testing.csv',sep=',',header=T,stringsAsFactors = F)
+testing_keep<-apply(testing,2,FILTER)
+testing_filtered<-testing[,testing_keep]
+testing_filtered<-testing_filtered[,c(-1,-3:-7,-11,-24,-37,-50)]
+testing_scaled<-scale(testing_filtered[,2:49])
+testing_final<-cbind(testing_filtered[,c("user_name","problem_id")],testing_scaled)
+testing_final$user_name<-as.factor(testing_final$user_name)
+
+test_fit1<-predict(fit1,testing_final)
+test_fit2<-predict(fit2,testing_final)
+test_fit3<-predict(fit3,testing_final)
+test_fitrf<-predict(fitrf,testing_final)
+testingDF<-data.frame(rpart=test_fit1,gbm=test_fit2,lda=test_fit3,rf=test_fitrf)
+testing_result<-predict(combModFit,testingDF)
+print(testing_result)
+```
+
+```{r, echo=F,eval=F}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(testing_result)
+```
